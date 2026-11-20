@@ -16,7 +16,7 @@ outcomes:
       - find a walking route with a sightseeing detour
       - can i walk between these appointments
       - suggest a scenic stop along my walking route
-      - fit a walk into my schedule
+      - find a walking route that fits my available time
     inputs:
       - name: start_place
         type: string
