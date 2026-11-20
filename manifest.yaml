@@ -5,7 +5,7 @@ app:
   id: hack.app_4d63
   name: DayFlow
   version: 0.1.0
-  summary: Plan a walk between two places, with a scenic stop when time allows.
+  summary: Plan scenic walks, find nearby places, and calculate BMI.
 agent_types:
   - personal
 outcomes:
@@ -94,3 +94,84 @@ outcomes:
       - name: note
         type: string
         description: Practical advice and limitations for the recommendation.
+  - id: places.restaurants
+    summary: Find restaurants near a named place and show a map search
+    example_phrases:
+      - find restaurants near the british museum
+      - show me restaurants near covent garden
+      - find a place to eat near my destination
+    inputs:
+      - name: location
+        type: string
+        required: false
+        description: The place or address the user explicitly wants to search near; leave blank if missing and never guess. Sent to public mapping services.
+    output:
+      - name: location
+        type: string
+        description: The resolved search location, or the user's original location if lookup failed.
+      - name: status
+        type: string
+        description: found, empty, or unavailable; when unavailable do not invent restaurant names.
+      - name: venues
+        type: string
+        description: Verified map entries with straight-line distances and map links, or empty when none were found. Cuisine may be listed but menu, nutrition and healthiness are not verified.
+      - name: map_url
+        type: string
+        description: Google Maps restaurant search link. Include this link in the answer.
+      - name: note
+        type: string
+        description: Data limitations, attribution and privacy notice; include the limitations in the answer.
+  - id: places.gyms
+    summary: Find gyms near a named place and show a map search
+    example_phrases:
+      - find gyms near the british museum
+      - show me fitness centres near covent garden
+      - find a gym near my destination
+    inputs:
+      - name: location
+        type: string
+        required: false
+        description: The place or address the user explicitly wants to search near; leave blank if missing and never guess. Sent to public mapping services.
+    output:
+      - name: location
+        type: string
+        description: The resolved search location, or the user's original location if lookup failed.
+      - name: status
+        type: string
+        description: found, empty, or unavailable; when unavailable do not invent gym names.
+      - name: venues
+        type: string
+        description: Verified map entries with straight-line distances and map links, or empty when none were found.
+      - name: map_url
+        type: string
+        description: Google Maps gym search link. Include this link in the answer.
+      - name: note
+        type: string
+        description: Data limitations, attribution and privacy notice; include the limitations in the answer.
+  - id: body.bmi
+    summary: Calculate BMI from a height and weight provided by the user
+    example_phrases:
+      - calculate my bmi from my height and weight
+      - calculate bmi for 170 cm and 60 kg
+    inputs:
+      - name: height_cm
+        type: number
+        required: false
+        description: Height in centimetres explicitly provided by the user; never guess.
+      - name: weight_kg
+        type: number
+        required: false
+        description: Weight in kilograms explicitly provided by the user; never guess.
+    output:
+      - name: height_cm
+        type: number
+        description: Height supplied in centimetres.
+      - name: weight_kg
+        type: number
+        description: Weight supplied in kilograms.
+      - name: bmi
+        type: number
+        description: Calculated BMI, a rough screening measure rather than a diagnosis.
+      - name: note
+        type: string
+        description: Limitations and privacy note; include this in the answer.

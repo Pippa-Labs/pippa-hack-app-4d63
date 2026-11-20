@@ -1,5 +1,7 @@
 # Build an app for Pippa
 
+**DayFlow project:** Read the [project vision and prototype scope](DAYFLOW_VISION.md).
+
 You have about two hours. At the end of it, a program you built will be running
 inside a real personal assistant, answering real questions.
 

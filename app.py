@@ -7,11 +7,21 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from pippa_agentapp_sdk import AgentAppError, Manifest, Result, load_manifest_file, validate_manifest
+import places
+import dayflow_profile
 
 MANIFEST_PATH = Path(__file__).with_name('manifest.yaml')
 
 class MissingDetails(AgentAppError):
     user_message = 'Please provide a starting place, a destination, and the minutes available between your plans.'
+    retryable = False
+
+class MissingLocation(AgentAppError):
+    user_message = 'Please provide the place or address near which you want to search.'
+    retryable = False
+
+class InvalidMeasurements(AgentAppError):
+    user_message = 'Please provide a valid height in cm and weight in kg.'
     retryable = False
 
 class LookupUnavailable(AgentAppError):
@@ -56,19 +66,51 @@ def _map_link(start, destination, waypoint=None):
     return 'https://www.google.com/maps/dir/?' + urlencode(params)
 
 
+def _distance_km(lat1, lon1, lat2, lon2):
+    """Straight-line distance, used to keep Photon fallback results local."""
+    radians = math.pi / 180
+    delta_lat = (lat2 - lat1) * radians
+    delta_lon = (lon2 - lon1) * radians
+    h = (math.sin(delta_lat / 2) ** 2 + math.cos(lat1 * radians) *
+         math.cos(lat2 * radians) * math.sin(delta_lon / 2) ** 2)
+    return 12742 * math.asin(min(1, math.sqrt(h)))
+
+
 def _sights(start, destination):
     lat = (start['lat'] + destination['lat']) / 2
     lon = (start['lon'] + destination['lon']) / 2
-    # A small, bounded search near the midpoint; routing below decides feasibility.
-    query = f'[out:json][timeout:4];(nwr["tourism"~"^(attraction|viewpoint|museum)$"]["name"](around:1500,{lat},{lon}););out center 12;'
-    data = _fetch('https://overpass-api.de/api/interpreter', {'data': query}, timeout=3)
+    # Search OpenStreetMap near the midpoint; each candidate is routed before
+    # being recommended.  The fallback is deliberately bounded and only
+    # accepts explicitly mapped museums, not unrelated search results.
+    query = f'[out:json][timeout:3];(nwr["tourism"~"^(attraction|viewpoint|museum)$"]["name"](around:1500,{lat},{lon}););out center 12;'
     result = []
-    for item in data.get('elements', []):
-        coords = item if 'lat' in item else item.get('center', {})
-        name = item.get('tags', {}).get('name')
-        if name and 'lat' in coords and 'lon' in coords:
-            result.append({'name': name, 'lat': coords['lat'], 'lon': coords['lon']})
-    return result
+    try:
+        data = _fetch('https://overpass-api.de/api/interpreter', {'data': query}, timeout=2)
+        for item in data.get('elements', []):
+            coords = item if 'lat' in item else item.get('center', {})
+            name = item.get('tags', {}).get('name')
+            if name and 'lat' in coords and 'lon' in coords:
+                result.append({'name': name, 'lat': coords['lat'], 'lon': coords['lon']})
+    except Exception:
+        pass
+    if not result:
+        data = _fetch('https://photon.komoot.io/api/', {
+            'q': 'museum', 'lat': lat, 'lon': lon, 'limit': 20,
+            'osm_tag': 'tourism:museum',
+        }, timeout=2)
+        for feature in data.get('features', []):
+            props = feature.get('properties', {})
+            coords = feature.get('geometry', {}).get('coordinates', [])
+            if (props.get('osm_key') != 'tourism' or props.get('osm_value') != 'museum'
+                    or not props.get('name') or len(coords) < 2):
+                continue
+            try:
+                sight_lon, sight_lat = float(coords[0]), float(coords[1])
+                if _distance_km(lat, lon, sight_lat, sight_lon) <= 1.5:
+                    result.append({'name': props['name'], 'lat': sight_lat, 'lon': sight_lon})
+            except (ValueError, TypeError):
+                continue
+    return sorted(result, key=lambda sight: _distance_km(lat, lon, sight['lat'], sight['lon']))
 
 
 class App:
@@ -80,6 +122,30 @@ class App:
         return self._manifest
 
     def handle(self, call):
+        if call.outcome_id == 'body.bmi':
+            try:
+                result = dayflow_profile.calculate_bmi(call.inputs.get('height_cm'), call.inputs.get('weight_kg'))
+            except ValueError as exc:
+                raise InvalidMeasurements('invalid measurements') from exc
+            return Result(data=result, narrative=f"BMI: {result['bmi']}. {result['note']}")
+        if call.outcome_id in ('places.restaurants', 'places.gyms'):
+            location = (call.inputs.get('location') or '').strip()
+            if not location:
+                raise MissingLocation('missing location')
+            kind = 'restaurant' if call.outcome_id == 'places.restaurants' else 'gym'
+            found = places.find_places(location, kind, _place, _fetch)
+            venue_lines = []
+            for venue in found['places']:
+                cuisine = f", cuisine: {venue['cuisine']}" if venue['cuisine'] else ''
+                venue_lines.append(f"{venue['name']} ({venue['distance_km']:.2f} km straight-line{cuisine}): {venue['map_url']}")
+            venue_text = '\n'.join(venue_lines)
+            subject = 'restaurants' if kind == 'restaurant' else 'gyms'
+            narrative = (f"Nearby {subject} around {found['location']}: {venue_text or 'No verified venues to list.'} "
+                         f"Map search: {found['map_url']}. {found['note']}")
+            return Result(data={
+                'location': found['location'], 'status': found['status'],
+                'venues': venue_text, 'map_url': found['map_url'], 'note': found['note'],
+            }, narrative=narrative)
         if call.outcome_id != 'walk.plan':
             raise AgentAppError('Unknown outcome')
         inputs = call.inputs

@@ -70,3 +70,69 @@ def test_route_service_failure_reports_error(services, monkeypatch):
 def test_invalid_values_are_rejected(services):
     with pytest.raises(app.MissingDetails):
         call(start_place='A', destination='B', available_minutes=40, weight_kg=-5)
+
+
+def test_sights_fallback_only_uses_nearby_mapped_museums(monkeypatch):
+    def fake_fetch(url, params, timeout=2):
+        if 'overpass' in url:
+            raise TimeoutError()
+        assert params['osm_tag'] == 'tourism:museum'
+        return {'features': [
+            {'properties': {'name': 'Museum Tavern', 'osm_key': 'amenity', 'osm_value': 'pub'},
+             'geometry': {'coordinates': [-0.1, 51.5]}},
+            {'properties': {'name': 'Far Museum', 'osm_key': 'tourism', 'osm_value': 'museum'},
+             'geometry': {'coordinates': [-0.5, 51.5]}},
+            {'properties': {'name': 'Nearby Museum', 'osm_key': 'tourism', 'osm_value': 'museum'},
+             'geometry': {'coordinates': [-0.101, 51.5]}},
+        ]}
+    monkeypatch.setattr(app, '_fetch', fake_fetch)
+    place = {'lat': 51.5, 'lon': -0.1}
+    assert [s['name'] for s in app._sights(place, place)] == ['Nearby Museum']
+
+
+def test_sights_propagates_outage_when_all_sources_fail(monkeypatch):
+    def fail(*args, **kwargs): raise TimeoutError()
+    monkeypatch.setattr(app, '_fetch', fail)
+    with pytest.raises(TimeoutError):
+        app._sights({'lat': 51.5, 'lon': -0.1}, {'lat': 51.5, 'lon': -0.1})
+
+
+@pytest.mark.parametrize('outcome, expected_kind', [
+    ('places.restaurants', 'restaurant'), ('places.gyms', 'gym'),
+])
+def test_venue_outcomes_include_only_supplied_results(monkeypatch, outcome, expected_kind):
+    def fake_find(location, kind, geocode, fetch):
+        assert location == 'Museum' and kind == expected_kind
+        return {'location': 'Museum, London', 'status': 'found',
+                'places': [{'name': 'Example Venue', 'distance_km': 0.2,
+                            'cuisine': '', 'map_url': 'https://www.google.com/maps/search/?api=1'}],
+                'map_url': 'https://www.google.com/maps/search/?api=1',
+                'note': 'Distance is straight-line; check details.'}
+    monkeypatch.setattr(app.places, 'find_places', fake_find)
+    result = LocalRunner(app.App()).call(outcome, {'location': 'Museum'}, granted_secrets={}, now=NOW, request_id='test').result.data
+    assert result['status'] == 'found' and 'Example Venue' in result['venues']
+    assert '0.20 km straight-line' in result['venues'] and result['map_url'].startswith('https://www.google.com/maps/')
+
+
+def test_venue_service_failure_does_not_invent_results(monkeypatch):
+    monkeypatch.setattr(app.places, 'find_places', lambda *args: {
+        'location': 'London', 'status': 'unavailable', 'places': [],
+        'map_url': 'https://www.google.com/maps/search/?api=1', 'note': 'Could not check venues.'})
+    result = LocalRunner(app.App()).call('places.restaurants', {'location': 'London'}, granted_secrets={}, now=NOW, request_id='test').result.data
+    assert result['status'] == 'unavailable' and result['venues'] == ''
+
+
+def test_venue_requires_location():
+    with pytest.raises(app.MissingLocation):
+        LocalRunner(app.App()).call('places.gyms', {}, granted_secrets={}, now=NOW, request_id='test')
+
+
+def test_bmi_outcome_calculates_from_user_measurements():
+    result = LocalRunner(app.App()).call('body.bmi', {'height_cm': 170, 'weight_kg': 60}, granted_secrets={}, now=NOW, request_id='test').result.data
+    assert result['bmi'] == 20.8
+    assert 'not a diagnosis' in result['note'] and 'not saved' in result['note']
+
+
+def test_bmi_outcome_rejects_missing_measurements():
+    with pytest.raises(app.InvalidMeasurements):
+        LocalRunner(app.App()).call('body.bmi', {'height_cm': 170}, granted_secrets={}, now=NOW, request_id='test')
