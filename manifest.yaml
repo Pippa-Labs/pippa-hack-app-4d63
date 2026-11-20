@@ -153,6 +153,9 @@ outcomes:
     example_phrases:
       - calculate my bmi from my height and weight
       - calculate bmi for 170 cm and 60 kg
+      - what is my body mass index
+      - work out my bmi using my measurements
+      - find my bmi from my weight and height
     inputs:
       - name: height_cm
         type: number
