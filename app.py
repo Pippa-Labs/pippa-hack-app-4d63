@@ -1,178 +1,137 @@
-"""Your app. Replace this with whatever you are building.
-
-The shape never changes, whatever your app does:
-
-    class App:
-        manifest  -> the parsed manifest.yaml sitting next to this file
-        handle(call) -> Result
-
-`handle` is called once per request and must return a `Result` whose `data`
-matches the `output` your manifest declares for that outcome — exactly: every
-declared field present, nothing extra, right types. The runtime checks it and
-refuses anything that does not match, which is deliberate. An app that can
-return surprise fields is an app Pippa cannot describe to a user before they
-install it.
-
-Three things worth knowing before you start:
-
-**You get the inputs, and nothing about who asked.** No user id, no account,
-no conversation. `call.inputs` is what Pippa extracted from the message;
-besides it, `call.context` carries only the time, an id for your logs, and
-whether the person picked your app by name. This is on purpose: your app
-cannot leak what it was never given.
-
-**You keep nothing.** A fresh copy of this class is built for every call and
-thrown away afterwards. Writing to a file or a global will appear to work and
-then silently stop, because the next call may be on a different machine.
-
-**Errors are part of the design.** Raise `AgentAppError` with a `user_message`
-when you cannot answer. That message is the one a user may see; everything
-else — the exception type, the traceback — stays in the logs.
-"""
-
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import json
+import math
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-from pippa_agentapp_sdk import (
-    AgentAppError,
-    Call,
-    Manifest,
-    Result,
-    load_manifest_file,
-    validate_manifest,
-)
+from pippa_agentapp_sdk import AgentAppError, Manifest, Result, load_manifest_file, validate_manifest
 
-MANIFEST_PATH = Path(__file__).with_name("manifest.yaml")
+MANIFEST_PATH = Path(__file__).with_name('manifest.yaml')
 
-
-class CannotReadDate(AgentAppError):
-    """Raised when the message did not contain a date we can work with."""
-
-    # What a user may be shown. Write it as a sentence, not an error code.
-    user_message = "I could not work out which date you meant."
+class MissingDetails(AgentAppError):
+    user_message = 'Please provide a starting place, a destination, and the minutes available between your plans.'
     retryable = False
+
+class LookupUnavailable(AgentAppError):
+    user_message = 'I could not find a walking route right now. Please check the place names and try again later.'
+    retryable = True
+
+
+def _fetch(url, params, timeout=2):
+    request = Request(url + '?' + urlencode(params), headers={'User-Agent': 'DayFlow-hackathon/0.1 (walking route demo)', 'Accept': 'application/json'})
+    with urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def _place(query):
+    data = _fetch('https://photon.komoot.io/api/', {'q': query, 'limit': 1})
+    features = data.get('features', [])
+    if not features:
+        raise LookupUnavailable('place not found')
+    feature = features[0]
+    lon, lat = feature['geometry']['coordinates']
+    props = feature['properties']
+    label = ', '.join(str(props[k]) for k in ('name', 'housenumber', 'street', 'city', 'state', 'country') if props.get(k))
+    return {'lat': lat, 'lon': lon, 'name': label or query}
+
+
+def _route(points):
+    payload = {'locations': [{'lat': p['lat'], 'lon': p['lon']} for p in points], 'costing': 'pedestrian', 'units': 'kilometers'}
+    data = _fetch('https://valhalla1.openstreetmap.de/route', {'json': json.dumps(payload, separators=(',', ':'))})
+    summary = data['trip']['summary']
+    return float(summary['time']) / 60, float(summary['length'])
+
+
+def _sights(start, destination):
+    lat = (start['lat'] + destination['lat']) / 2
+    lon = (start['lon'] + destination['lon']) / 2
+    # A small, bounded search near the midpoint; routing below decides feasibility.
+    query = f'[out:json][timeout:4];(nwr["tourism"~"^(attraction|viewpoint|museum)$"]["name"](around:1500,{lat},{lon}););out center 12;'
+    data = _fetch('https://overpass-api.de/api/interpreter', {'data': query}, timeout=3)
+    result = []
+    for item in data.get('elements', []):
+        coords = item if 'lat' in item else item.get('center', {})
+        name = item.get('tags', {}).get('name')
+        if name and 'lat' in coords and 'lon' in coords:
+            result.append({'name': name, 'lat': coords['lat'], 'lon': coords['lon']})
+    return result
 
 
 class App:
-    """A small, complete example: count the days until a date."""
-
-    def __init__(self) -> None:
-        # Validated at construction, so an app whose manifest is wrong fails
-        # immediately and loudly rather than on some later call.
+    def __init__(self):
         self._manifest = validate_manifest(load_manifest_file(MANIFEST_PATH))
 
     @property
     def manifest(self) -> Manifest:
         return self._manifest
 
-    def handle(self, call: Call) -> Result:
-        """One request in, one Result out.
-
-        `call.outcome_id` says which of your manifest's outcomes was asked
-        for. With one outcome you can ignore it; with several, branch on it.
-        """
-        if call.outcome_id != "days.until":
-            raise AgentAppError(f"this app cannot do {call.outcome_id!r}")
-
-        text = (call.inputs.get("date") or "").strip()
-        if not text:
-            # The manifest tells the extractor to send an empty string rather
-            # than guess, so this is the ordinary "they did not say" path.
-            #
-            # A missing or unreadable date (here, and in `_parse` below) is
-            # the only thing this app refuses for, which is why it never reads
-            # `call.context.explicit`, True when the person picked the app
-            # with @. That refusal is right whoever chose the app; the test
-            # that says so is in test_app.py.
-            raise CannotReadDate("no date in the message")
-
-        # `call.context.now` is the current time, supplied by the runtime
-        # rather than read from the clock. That is what makes an app testable:
-        # a test can say what "now" is.
-        today = self._today(call)
-        target = self._parse(text, today)
-        difference = (target - today).days
-
-        return Result(
-            data={
-                "days": abs(difference),
-                "target_date": target.isoformat(),
-                "weekday": target.strftime("%A"),
-                "already_passed": difference < 0,
-            },
-            # Optional. One plain sentence Pippa may use when it writes its
-            # reply. Say what you found, not what you did.
-            narrative=self._sentence(target, difference),
-        )
-
-    @staticmethod
-    def _today(call: Call) -> date:
-        """The user's today, not the server's.
-
-        A server in UTC and a user in Auckland disagree about what day it is
-        for twelve hours out of every twenty-four, and "how many days until"
-        is exactly the question that notices.
-        """
-        # No try/except around ZoneInfo, and that is the point: the manifest
-        # declares this input as `type: timezone`, so the runtime has already
-        # rejected anything that is not a real IANA zone before your code
-        # runs. Declaring the right type is cheaper than validating by hand,
-        # and the user gets a better error.
-        zone = call.inputs.get("timezone")
-        moment: datetime = call.context.now
-        if zone:
-            moment = moment.astimezone(ZoneInfo(zone))
-        return moment.date()
-
-    @staticmethod
-    def _parse(text: str, today: date) -> date:
-        """Turn what the user wrote into a date.
-
-        Deliberately small — real date parsing is its own project. Handles
-        `YYYY-MM-DD`, `25 December`, `December 25` and a bare day number.
-        """
-        cleaned = text.replace(",", " ").strip()
-
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    def handle(self, call):
+        if call.outcome_id != 'walk.plan':
+            raise AgentAppError('Unknown outcome')
+        inputs = call.inputs
+        start_text = (inputs.get('start_place') or '').strip()
+        end_text = (inputs.get('destination') or '').strip()
+        try:
+            available = float(inputs['available_minutes'])
+            buffer = float(inputs.get('buffer_minutes') if inputs.get('buffer_minutes') is not None else 10)
+            extra_limit = float(inputs.get('max_extra_minutes') if inputs.get('max_extra_minutes') is not None else 10)
+            weight = float(inputs['weight_kg']) if inputs.get('weight_kg') is not None else None
+            if not all(math.isfinite(x) for x in (available, buffer, extra_limit)) or available <= 0 or buffer < 0 or extra_limit < 0 or (weight is not None and (not math.isfinite(weight) or not 20 <= weight <= 300)):
+                raise ValueError()
+        except (KeyError, ValueError, TypeError):
+            raise MissingDetails('invalid time or weight')
+        if not start_text or not end_text:
+            raise MissingDetails('missing place')
+        try:
+            start, destination = _place(start_text), _place(end_text)
+            direct_min, direct_km = _route([start, destination])
+        except Exception as exc:
+            if isinstance(exc, AgentAppError):
+                raise
+            raise LookupUnavailable('place or route lookup failed') from exc
+        walking_time = max(0, available - buffer)
+        fits = direct_min <= walking_time
+        selected = None
+        sight_problem = False
+        if fits and extra_limit > 0:
             try:
-                return datetime.strptime(cleaned, fmt).date()
-            except ValueError:
-                continue
-
-        for fmt in ("%d %B", "%B %d", "%d %b", "%b %d"):
-            try:
-                parsed = datetime.strptime(cleaned, fmt).date()
-            except ValueError:
-                continue
-            # A bare day and month has no year. "25 December" asked in
-            # February means this year; asked in December means this year too,
-            # until it has passed, and then it means next year.
-            candidate = parsed.replace(year=today.year)
-            if candidate < today:
-                candidate = candidate.replace(year=today.year + 1)
-            return candidate
-
-        if cleaned.lower() == "tomorrow":
-            return today + timedelta(days=1)
-
-        raise CannotReadDate(f"could not parse {text!r} as a date")
-
-    @staticmethod
-    def _sentence(target: date, difference: int) -> str:
-        # Built by hand rather than with `%-d`, which is a GNU extension: it
-        # raises ValueError on Windows, where half of you are developing, and
-        # the failure would only show up at the last line of a working app.
-        pretty = (
-            f"{target.strftime('%A')} {target.day} "
-            f"{target.strftime('%B')} {target.year}"
-        )
-        if difference == 0:
-            return f"That is today, {pretty}."
-        if difference < 0:
-            return f"{pretty} was {abs(difference)} days ago."
-        if difference == 1:
-            return f"{pretty} is tomorrow."
-        return f"There are {difference} days until {pretty}."
+                sights = _sights(start, destination)
+                # Limit external requests and choose the shortest feasible detour.
+                for sight in sights[:3]:
+                    try:
+                        minutes, km = _route([start, sight, destination])
+                    except Exception:
+                        sight_problem = True
+                        continue
+                    extra = max(0, minutes - direct_min)
+                    if minutes <= walking_time and extra <= extra_limit and (selected is None or minutes < selected[1]):
+                        selected = (sight, minutes, km, extra)
+            except Exception:
+                sight_problem = True
+        chosen_minutes = selected[1] if selected else direct_min
+        # 3.5 MET is a rough moderate-walking estimate; subtract resting energy.
+        calories = round(2.5 * weight * chosen_minutes / 60) if weight is not None else 0
+        if not fits:
+            note = 'The direct walk does not fit after the buffer; consider another mode of transport.'
+        elif selected:
+            note = 'This detour fits the stated time and buffer. Check opening times, route safety and accessibility before setting off.'
+        elif sight_problem:
+            note = 'The direct route fits, but scenic places could not be checked reliably. Check route safety and accessibility before setting off.'
+        else:
+            note = 'The direct route fits; no checked scenic detour met the time limits. Check route safety and accessibility before setting off.'
+        if weight is not None:
+            note += ' Active calories estimate the proposed walk, not calories already burned.'
+        note += ' Locations are sent to public mapping services. Map data © OpenStreetMap contributors.'
+        return Result(data={
+            'start_resolved': start['name'], 'destination_resolved': destination['name'],
+            'direct_minutes': round(direct_min, 1), 'direct_distance_km': round(direct_km, 2),
+            'available_walking_minutes': round(walking_time, 1), 'fits_schedule': fits,
+            'scenic_found': selected is not None, 'scenic_name': selected[0]['name'] if selected else '',
+            'scenic_minutes': round(selected[1], 1) if selected else 0,
+            'scenic_distance_km': round(selected[2], 2) if selected else 0,
+            'extra_minutes': round(selected[3], 1) if selected else 0,
+            'estimated_active_calories_kcal': calories, 'calories_estimated': weight is not None,
+            'note': note,
+        }, narrative=note)
