@@ -97,11 +97,11 @@ outcomes:
   - id: places.restaurants
     summary: Find restaurants near a named place and show a map search
     example_phrases:
-      - restaurants and places to eat nearby
-      - where can I have lunch around here
-      - show dining options close to this location
-      - search for dinner spots in the area
-      - find food venues nearby
+      - restaurants near the british museum
+      - where can i have lunch
+      - show dining options in covent garden
+      - suggest dinner spots
+      - find food venues
     inputs:
       - name: location
         type: string
@@ -126,11 +126,11 @@ outcomes:
   - id: places.gyms
     summary: Find gyms near a named place and show a map search
     example_phrases:
-      - gyms and fitness centres nearby
-      - where can I work out around here
-      - show exercise facilities close to this location
-      - search for a health club in the area
-      - locate a workout studio nearby
+      - gyms by paddington station
+      - fitness centres around my destination
+      - locate exercise facilities
+      - recommend a health club
+      - workout studios close to victoria
     inputs:
       - name: location
         type: string
