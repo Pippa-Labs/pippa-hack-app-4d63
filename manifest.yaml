@@ -43,6 +43,15 @@ outcomes:
         required: false
         description: Weight in kilograms only if explicitly provided; otherwise omit and never guess.
     output:
+      - name: route_verified
+        type: boolean
+        description: Whether DayFlow successfully checked the direct route; if false, do not invent route details, duration, distance, calories, or scenic stops.
+      - name: direct_map_url
+        type: string
+        description: Google Maps walking directions link. Always show this link to the user so they can open the map. Google may calculate a different route.
+      - name: scenic_map_url
+        type: string
+        description: Google Maps walking directions via the verified scenic stop, or empty if no stop was verified. Show the non-empty link.
       - name: start_resolved
         type: string
         description: Place name matched for the starting location.
@@ -63,7 +72,7 @@ outcomes:
         description: Whether the direct route fits within the available walking time.
       - name: scenic_found
         type: boolean
-        description: Whether a scenic detour satisfies the time limits.
+        description: Whether a scenic detour satisfies the time limits. If false, do not invent any scenic stops or claim that a detour was checked.
       - name: scenic_name
         type: string
         description: Name of the scenic stop, or empty if none is found.
@@ -81,7 +90,7 @@ outcomes:
         description: Rough estimate of active walking calories, or zero if no weight was provided.
       - name: calories_estimated
         type: boolean
-        description: Whether weight was provided and calories were estimated.
+        description: Whether weight was provided and calories were estimated. If false, do not invent a calorie value.
       - name: note
         type: string
         description: Practical advice and limitations for the recommendation.

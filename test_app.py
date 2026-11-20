@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from pippa_agentapp_sdk import LocalRunner
@@ -27,6 +28,11 @@ def test_feasible_detour_and_calories(services):
     assert result['extra_minutes'] == 7
     assert result['estimated_active_calories_kcal'] == 68
     assert result['calories_estimated']
+    assert result['route_verified']
+    direct = parse_qs(urlparse(result['direct_map_url']).query)
+    scenic = parse_qs(urlparse(result['scenic_map_url']).query)
+    assert direct['travelmode'] == ['walking']
+    assert scenic['waypoints'] == ['51.5,-0.1']
 
 
 def test_buffer_prevents_detour(services):
@@ -52,8 +58,13 @@ def test_scenic_service_failure_keeps_direct_route(services, monkeypatch):
 def test_route_service_failure_reports_error(services, monkeypatch):
     def fail(*args): raise TimeoutError()
     monkeypatch.setattr(app, '_route', fail)
-    with pytest.raises(app.LookupUnavailable):
-        call(start_place='A', destination='B', available_minutes=40)
+    result = call(start_place='A & Co', destination='B', available_minutes=40)
+    assert not result['route_verified'] and not result['scenic_found']
+    assert not result['calories_estimated']
+    assert 'lookup failed' in result['note']
+    query = parse_qs(urlparse(result['direct_map_url']).query)
+    assert query['origin'] == ['A & Co'] and query['destination'] == ['B']
+    assert query['travelmode'] == ['walking']
 
 
 def test_invalid_values_are_rejected(services):

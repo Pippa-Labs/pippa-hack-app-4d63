@@ -44,6 +44,18 @@ def _route(points):
     return float(summary['time']) / 60, float(summary['length'])
 
 
+def _map_link(start, destination, waypoint=None):
+    """Google Maps directions use geocoded coordinates where available."""
+    def point(value):
+        if isinstance(value, dict):
+            return f"{value['lat']},{value['lon']}"
+        return value
+    params = {'api': '1', 'origin': point(start), 'destination': point(destination), 'travelmode': 'walking'}
+    if waypoint is not None:
+        params['waypoints'] = point(waypoint)
+    return 'https://www.google.com/maps/dir/?' + urlencode(params)
+
+
 def _sights(start, destination):
     lat = (start['lat'] + destination['lat']) / 2
     lon = (start['lon'] + destination['lon']) / 2
@@ -84,14 +96,27 @@ class App:
             raise MissingDetails('invalid time or weight')
         if not start_text or not end_text:
             raise MissingDetails('missing place')
+        walking_time = max(0, available - buffer)
         try:
             start, destination = _place(start_text), _place(end_text)
             direct_min, direct_km = _route([start, destination])
         except Exception as exc:
-            if isinstance(exc, AgentAppError):
-                raise
-            raise LookupUnavailable('place or route lookup failed') from exc
-        walking_time = max(0, available - buffer)
+            # A useful navigation link remains available even if our provider
+            # is down; none of its route figures have been verified by DayFlow.
+            link = _map_link(start_text, end_text)
+            note = ('The route lookup failed, so no route time, distance, scenic stop or calories could be verified. '
+                    'Open the walking directions link and check the suggested places yourself. '
+                    'Google Maps may resolve names differently and calculates its own route. '
+                    'Locations are sent to public mapping services.')
+            return Result(data={
+                'start_resolved': start_text, 'destination_resolved': end_text,
+                'route_verified': False, 'direct_map_url': link, 'scenic_map_url': '',
+                'direct_minutes': 0, 'direct_distance_km': 0,
+                'available_walking_minutes': round(walking_time, 1), 'fits_schedule': False,
+                'scenic_found': False, 'scenic_name': '', 'scenic_minutes': 0,
+                'scenic_distance_km': 0, 'extra_minutes': 0,
+                'estimated_active_calories_kcal': 0, 'calories_estimated': False, 'note': note,
+            }, narrative=f'{note} Walking directions: {link}')
         fits = direct_min <= walking_time
         selected = None
         sight_problem = False
@@ -124,8 +149,26 @@ class App:
         if weight is not None:
             note += ' Active calories estimate the proposed walk, not calories already burned.'
         note += ' Locations are sent to public mapping services. Map data © OpenStreetMap contributors.'
+        direct_link = _map_link(start, destination)
+        scenic_link = _map_link(start, destination, selected[0]) if selected else ''
+        summary = (f"Direct walking route from {start['name']} to {destination['name']}: "
+                   f"{direct_km:.2f} km, about {direct_min:.1f} minutes; "
+                   f"{walking_time:.1f} minutes available after the {buffer:g}-minute buffer. "
+                   f"Direct walking directions: {direct_link}. ")
+        if selected:
+            summary += (f"Checked scenic stop: {selected[0]['name']}; via this stop "
+                        f"{selected[2]:.2f} km, {selected[1]:.1f} minutes, "
+                        f"{selected[3]:.1f} extra minutes. Scenic walking directions: {scenic_link}. ")
+        else:
+            summary += 'No scenic stop was verified; do not suggest or invent one. '
+        if weight is not None:
+            summary += f'Estimated active calories for the proposed walk: {calories} kcal, not calories already burned. '
+        else:
+            summary += 'Calories were not estimated because no weight was supplied. '
+        note += ' Google Maps calculates its own route, which may differ from the estimate above.'
         return Result(data={
             'start_resolved': start['name'], 'destination_resolved': destination['name'],
+            'route_verified': True, 'direct_map_url': direct_link, 'scenic_map_url': scenic_link,
             'direct_minutes': round(direct_min, 1), 'direct_distance_km': round(direct_km, 2),
             'available_walking_minutes': round(walking_time, 1), 'fits_schedule': fits,
             'scenic_found': selected is not None, 'scenic_name': selected[0]['name'] if selected else '',
@@ -134,4 +177,4 @@ class App:
             'extra_minutes': round(selected[3], 1) if selected else 0,
             'estimated_active_calories_kcal': calories, 'calories_estimated': weight is not None,
             'note': note,
-        }, narrative=note)
+        }, narrative=summary + note)
